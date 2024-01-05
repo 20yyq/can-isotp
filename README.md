@@ -1,5 +1,10 @@
 # can-isotp
 golang network can bus isotp protocol
+
+# 简介
+
+协议借鉴 [Linux Kernel Module for ISO 15765-2:2016](https://github.com/hartkopp/can-isotp.git)
+
 ## 例子
 
 ```go
@@ -9,7 +14,7 @@ func main() {
 	if err == nil {
 		isotp.Init(c)
 		if itp := isotp.IsoTP(128, 384); itp != nil {
-			itp.Config = isotp.Config{STmin: 0x14, BS: 0x00} // 20毫秒不限制接收帧数，再无流控帧发送
+			itp.ResetConfig(isotp.Config{STmin: 0x14, BS: 0x00}) // 20毫秒不限制接收帧数，再无流控帧发送
 			go func() {
 				b := itp.ReadData()
 				for b != nil {
@@ -20,7 +25,7 @@ func main() {
 			}()
 		}
 		if itp := isotp.IsoTP(1, 257); itp != nil {
-			itp.Config = isotp.Config{STmin: 0x0A, BS: 0x0F} // 每10毫秒内接收16帧，然后再发送一帧流控帧
+			itp.ResetConfig(isotp.Config{STmin: 0x0A, BS: 0x0F}) // 每10毫秒内接收16帧，然后再发送一帧流控帧
 			go func() {
 				b := itp.ReadData()
 				for b != nil {

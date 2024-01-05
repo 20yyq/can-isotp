@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 10:21:09
-// @ LastEditTime : 2024-01-05 13:41:58
+// @ LastEditTime : 2024-01-05 16:38:01
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -12,12 +12,13 @@ package isotp
 
 import (
 	"fmt"
-	"runtime"
+	"io"
 	"sync"
-	"time"
 
 	"github.com/20yyq/packet/can"
 )
+
+const MAX_PACKET = 0xFFF // 单个协议包最大长度
 
 const N_PCI_SF = 0x00       /* single frame */
 const N_PCI_FF = 0x10       /* first frame */
@@ -55,133 +56,89 @@ func Init(c Can) {
 		canConn.can = c
 		go func() {
 			frame, err := canConn.can.ReadFrame()
-			for err == nil {
-				go lisetnFrame(frame)
+			for err != io.EOF {
+				if err == nil {
+					go listener(frame)
+				}
 				frame, err = canConn.can.ReadFrame()
 			}
 		}()
 	}
 }
 
-func lisetnFrame(frame can.Frame) {
+func listener(frame can.Frame) {
 	var run func(can.Frame)
 	pci, id := frame.Data[0]&0xF0, frame.ID()
 	canConn.mutex.RLock()
+	defer canConn.mutex.RUnlock()
 	itp := canConn.isotp[id]
-	canConn.mutex.RUnlock()
-	switch {
-	case pci != N_PCI_FC_CTS && itp == nil:
-		canConn.mutex.RLock()
+	switch pci {
+	case N_PCI_SF, N_PCI_FF, N_PCI_CF:
 		for _, v := range canConn.isotp {
 			v.mutex.RLock()
 			c := v.conn[id]
-			switch {
-			case pci == N_PCI_SF && c != nil:
-				run = c.singleFrame
-			case pci == N_PCI_FF && c != nil:
-				run = c.firstFrame
-			case pci == N_PCI_CF && c != nil:
-				run = c.consecutiveFrame
-			}
-			if run != nil {
-				v.mutex.RUnlock()
+			v.mutex.RUnlock()
+			if c != nil {
+				switch pci {
+				case N_PCI_SF:
+					run = (&c.read).single
+				case N_PCI_FF:
+					run = (&c.read).first
+				case N_PCI_CF:
+					run = (&c.read).consecutive
+				}
 				break
 			}
-			v.mutex.RUnlock()
 		}
-		canConn.mutex.RUnlock()
 		if run != nil {
 			break
 		}
 		fallthrough
-	case pci == N_PCI_FC_CTS:
+	case N_PCI_FC_CTS:
 		if itp != nil {
-			run = itp.checkFrame
+			run = itp.flowFrame
 			break
 		}
 		fallthrough
 	default:
-		run = otherFrame
+		run = ignoreFrame
 	}
 	go run(frame)
 }
 
-// func checkFrame(frame can.Frame) {
-// 	var run func(can.Frame)
-// 	pci, id := frame.Data[0]&0xF0, frame.ID()
-// 	canConn.mutex.RLock()
-// 	itp := canConn.list[id]
-// 	canConn.mutex.RUnlock()
-// 	switch {
-// 	case pci == N_PCI_SF && itp != nil:
-// 		run = itp.singleFrame
-// 	case pci == N_PCI_FF && itp != nil:
-// 		run = itp.firstFrame
-// 	case pci == N_PCI_CF && itp != nil:
-// 		run = itp.consecutiveFrame
-// 	case pci == N_PCI_FC_CTS && id == canConn.id && itp == nil:
-// 		canConn.mutex.RLock()
-// 		for _, v := range canConn.list {
-// 			switch frame.Data[0] {
-// 			case N_PCI_FC_CTS:
-// 				v.mutex.RLock()
-// 				if itp.state == ISOTP_WAIT_FIRST_FC || itp.state == ISOTP_WAIT_FC {
-// 					run = v.flowFrameCTS
-// 				}
-// 				v.mutex.RUnlock()
-// 			case N_PCI_FC_WT:
-// 				run = v.flowFrameWT
-// 			case N_PCI_FC_OVFLW:
-// 				run = v.flowFrameOVFLW
-// 			}
-// 			if run != nil {
-// 				break
-// 			}
-// 		}
-// 		canConn.mutex.RUnlock()
-// 		if run != nil {
-// 			break
-// 		}
-// 		fallthrough
-// 	default:
-// 		run = otherFrame
-// 	}
-// 	go run(frame)
-// }
-
-func writeFrame(f can.Frame) error {
+func send(f can.Frame) error {
 	if canConn.can != nil {
 		return canConn.can.WriteFrame(f)
 	}
 	return fmt.Errorf("not can")
 }
 
-func otherFrame(f can.Frame) {
-	fmt.Println("N_PCI---------otherFrame----------N_PCI", f)
+func ignoreFrame(f can.Frame) {
+	fmt.Println("N_PCI---------ignoreFrame----------N_PCI", f)
 }
 
 type isoTP struct {
-	mutex *sync.RWMutex
+	mutex sync.RWMutex
 	txid  uint32
 	conn  map[uint32]*Conn
 }
 
-func (itp *isoTP) checkFrame(f can.Frame) {
+func (itp *isoTP) flowFrame(f can.Frame) {
 	var is bool
 	itp.mutex.RLock()
 	for _, c := range itp.conn {
 		var run func(can.Frame)
 		switch f.Data[0] {
 		case N_PCI_FC_CTS:
-			c.mutex.RLock()
-			if c.state == ISOTP_WAIT_FIRST_FC || c.state == ISOTP_WAIT_FC {
-				run = c.flowFrameCTS
+			c.write.mutex.RLock()
+			if c.write.state == ISOTP_WAIT_FIRST_FC || c.write.state == ISOTP_WAIT_FC {
+				run = (&c.write).cts
 			}
-			c.mutex.RUnlock()
+			c.write.mutex.RUnlock()
 		case N_PCI_FC_WT:
-			run = c.flowFrameWT
+			run = (&c.write).wait
 		case N_PCI_FC_OVFLW:
-			run = c.flowFrameOVFLW
+			run = (&c.write).overflow
 		}
 		if run != nil {
 			is = true
@@ -190,7 +147,7 @@ func (itp *isoTP) checkFrame(f can.Frame) {
 	}
 	itp.mutex.RUnlock()
 	if !is {
-		go otherFrame(f)
+		go ignoreFrame(f)
 	}
 	// fmt.Println("---------------(itp *isoTP) checkFrame---------------")
 	// fmt.Println(f)
@@ -202,28 +159,18 @@ func IsoTP(txid, rxid uint32) *Conn {
 	defer canConn.mutex.Unlock()
 	itp := canConn.isotp[txid]
 	if itp == nil {
-		itp = &isoTP{
-			mutex: &sync.RWMutex{},
-			txid:  txid,
-			conn:  map[uint32]*Conn{},
-		}
+		itp = &isoTP{txid: txid, conn: map[uint32]*Conn{}}
 		canConn.isotp[txid] = itp
 	}
 	itp.mutex.Lock()
 	defer itp.mutex.Unlock()
 	c := itp.conn[rxid]
 	if c == nil {
-		c = &Conn{
-			Config: defaultConfig,
-			parent: itp,
-			mutex:  &sync.RWMutex{},
-			state:  ISOTP_IDLE,
-			rxid:   rxid,
-			ff:     can.Frame{Len: 3},
-			read:   make(chan []byte, 1),
-		}
-		c.ff.Data = [64]byte{N_PCI_FC_CTS, defaultConfig.BS, defaultConfig.STmin}
-		(&c.ff).SetID(itp.txid)
+		c = &Conn{parent: itp}
+		c.read.cfg, c.read.c = defaultConfig, make(chan []byte, 5)
+		c.read.ff.Len, c.read.ff.Data = 3, [64]byte{N_PCI_FC_CTS, defaultConfig.BS, defaultConfig.STmin}
+		c.r, c.write.rxid = c.read.c, rxid
+		(&c.read.ff).SetID(itp.txid)
 		itp.conn[rxid] = c
 	}
 	return c
@@ -240,183 +187,39 @@ type Config struct {
 }
 
 type Conn struct {
-	Config Config
 	parent *isoTP
-	mutex  *sync.RWMutex
-	state  uint8
-	rxid   uint32
-	len    uint16
-	n      int
-	b      [4095]byte
-	bs     int8
-	sn     byte
-	ff     can.Frame
-	read   chan []byte
+	read   read
+	write  write
+	r      <-chan []byte
 }
 
 func (c *Conn) ReadData() []byte {
-	b, _ := <-c.read
+	b, _ := <-c.r
 	return b
 }
 
 func (c *Conn) WriteData(b []byte) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.state != ISOTP_IDLE {
+	c.write.mutex.Lock()
+	defer c.write.mutex.Unlock()
+	if c.write.state != ISOTP_IDLE {
 		fmt.Println("---------------WriteData errors---------------")
 		return fmt.Errorf("busy")
 	}
-	c.state = ISOTP_WAIT_FIRST_FC
-	c.len, c.n, c.sn = uint16(len(b)), 6, 1
-	frame := &can.Frame{Len: 8, Data: [64]byte{}}
-	frame.SetID(c.rxid)
-	frame.Data[0] = byte(c.len>>8) | 0x10
-	frame.Data[1] = byte(c.len)
-	copy(c.b[:], b)
-	copy(frame.Data[2:], c.b[0:c.n])
-	go writeFrame(*frame)
+	if c.write.len = uint16(len(b)); c.write.len > MAX_PACKET {
+		return fmt.Errorf("too lenght")
+	}
+	c.write.state, c.write.b, c.write.n, c.write.sn = ISOTP_WAIT_FIRST_FC, make([]byte, c.write.len), 6, 1
+	frame := &can.Frame{Len: 8}
+	frame.SetID(c.write.rxid)
+	frame.Data[0], frame.Data[1] = byte(c.write.len>>8)|N_PCI_FF, byte(c.write.len)
+	copy(c.write.b, b)
+	copy(frame.Data[2:], c.write.b[0:c.write.n])
+	go send(*frame)
 	return nil
 }
 
-func (c *Conn) singleFrame(f can.Frame) {
-	fmt.Println("---------------singleFrame---------------")
-	fmt.Println("---------------singleFrame---------------")
-}
-
-func (c *Conn) firstFrame(f can.Frame) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.state != ISOTP_IDLE {
-		fmt.Println("---------------firstFrame errors---------------", f, c.state)
-		return
-	}
-	c.len, c.bs = uint16(f.Data[0]&0x0F)<<8+uint16(f.Data[1]), int8(c.Config.BS)-1
-	c.n, c.ff.Data = 6, [64]byte{N_PCI_FC_CTS, c.Config.BS, c.Config.STmin}
-	copy(c.b[0:], f.Data[2:c.n+2])
-	go writeFrame(c.ff)
-	c.state = ISOTP_WAIT_DATA
-}
-
-func (c *Conn) consecutiveFrame(f can.Frame) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.state != ISOTP_WAIT_DATA {
-		fmt.Println("---------------consecutiveFrame errors---------------")
-		return
-	}
-	copy(c.b[c.n:], f.Data[1:f.Len])
-	c.n += 7
-	if c.n < int(c.len) {
-		if c.bs > -1 {
-			if c.bs--; c.bs == -1 {
-				c.bs = int8(c.Config.BS) - 1
-				go writeFrame(c.ff)
-			}
-		}
-		return
-	}
-	c.state = ISOTP_IDLE
-	go func() {
-		b := make([]byte, c.len)
-		copy(b, c.b[:])
-		c.read <- b
-		fmt.Println("---------------consecutiveFrame---------------")
-		fmt.Println(runtime.NumGoroutine())
-		fmt.Println("---------------consecutiveFrame---------------")
-	}()
-}
-
-func (c *Conn) flowFrameCTS(f can.Frame) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.state != ISOTP_WAIT_FIRST_FC && c.state != ISOTP_WAIT_FC {
-		fmt.Println("---------------flowFrameCTS errors---------------")
-		return
-	}
-	c.state, c.bs = ISOTP_SENDING, int8(f.Data[1])-1
-	endTime := time.Now().Add(time.Millisecond * 127)
-	if f.Data[2] > 0 {
-		endTime = time.Now().Add(time.Millisecond * time.Duration(f.Data[2]))
-	}
-	go func(endTime time.Time) {
-		for {
-			if endTime.Sub(time.Now()) < 1 {
-				fmt.Println("-------------------time out-------------------")
-				break
-			}
-			if !c.loop() {
-				break
-			}
-		}
-	}(endTime)
-}
-
-func (c *Conn) loop() bool {
-	c.mutex.RLock()
-	state := c.state
-	c.mutex.RUnlock()
-	switch state {
-	case ISOTP_IDLE:
-		fallthrough
-	case ISOTP_WAIT_FC:
-		fallthrough
-	default:
-		return false
-	case ISOTP_SENDING:
-		// frame.Data[0] |= (((c.bs ^ 0xFF) % 0x10) + 1) % 0x10
-		frame := &can.Frame{Len: 8, Data: [64]byte{N_PCI_CF | c.sn}}
-		frame.SetID(c.rxid)
-		n := c.n + 7
-		if n > int(c.len) {
-			n = int(c.len)
-		}
-		copy(frame.Data[1:], c.b[c.n:n])
-		writeFrame(*frame)
-		c.mutex.Lock()
-		defer c.mutex.Unlock()
-		if c.state == ISOTP_SENDING {
-			if c.n = n; c.n == int(c.len) {
-				c.state = ISOTP_IDLE
-				return false
-			}
-			c.sn++
-			if c.sn %= 0x10; c.bs > -1 {
-				if c.bs--; c.bs == -1 {
-					c.state = ISOTP_WAIT_FIRST_FC
-					return false
-				}
-			}
-		}
-		return true
-	}
-}
-
-func (c *Conn) flowFrameWT(f can.Frame) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.state != ISOTP_SENDING && c.state != ISOTP_WAIT_FIRST_FC {
-		if f.Len < 3 {
-			fmt.Println("---------------flowFrameWT len errors---------------")
-			return
-		}
-		fmt.Println("---------------flowFrameWT errors---------------")
-		return
-	}
-	c.state = ISOTP_WAIT_FC
-	fmt.Println("---------------flowFrameWT---------------")
-	fmt.Println(f)
-	fmt.Println("---------------flowFrameWT---------------")
-}
-
-func (c *Conn) flowFrameOVFLW(f can.Frame) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	if c.state != ISOTP_SENDING && c.state != ISOTP_WAIT_FIRST_FC {
-		fmt.Println("---------------flowFrameOVFLW errors---------------", f)
-		return
-	}
-	c.state = ISOTP_IDLE
-	fmt.Println("---------------flowFrameOVFLW---------------")
-	fmt.Println(f)
-	fmt.Println("---------------flowFrameOVFLW---------------")
+func (c *Conn) ResetConfig(cfg Config) {
+	c.read.mutex.Lock()
+	defer c.read.mutex.Unlock()
+	c.read.cfg = cfg
 }
