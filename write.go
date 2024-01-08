@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 16:22:59
-// @ LastEditTime : 2024-01-05 16:37:44
+// @ LastEditTime : 2024-01-08 13:42:49
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -19,7 +19,9 @@ import (
 )
 
 type write struct {
+	cfg   Config
 	mutex sync.RWMutex
+	timer *time.Timer
 	rxid  uint32
 	state uint8
 	len   uint16
@@ -36,12 +38,12 @@ func (tx *write) loop() bool {
 	switch state {
 	case ISOTP_SENDING:
 		// frame.Data[0] |= (((tx.bs ^ 0xFF) % N_PCI_FF) + 1) % N_PCI_FF
-		frame := &can.Frame{Len: 8, Data: [64]byte{N_PCI_CF | tx.sn}}
-		frame.SetID(tx.rxid)
-		n := tx.n + 7
+		n := tx.n + int(tx.cfg.dlc) - 1
 		if n > int(tx.len) {
 			n = int(tx.len)
 		}
+		frame := &can.Frame{Len: uint8(n - tx.n + 1), Data: [64]byte{N_PCI_CF | tx.sn}}
+		frame.SetID(tx.rxid)
 		copy(frame.Data[1:], tx.b[tx.n:n])
 		send(*frame)
 		tx.mutex.Lock()
@@ -56,7 +58,7 @@ func (tx *write) loop() bool {
 		tx.sn++
 		if tx.sn %= N_PCI_FF; tx.bs > -1 {
 			if tx.bs--; tx.bs == -1 {
-				tx.state = ISOTP_WAIT_FIRST_FC
+				tx.state = ISOTP_WAIT_FC
 				break
 			}
 		}
@@ -71,7 +73,7 @@ func (tx *write) loop() bool {
 func (tx *write) cts(f can.Frame) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
-	if tx.state != ISOTP_WAIT_FIRST_FC && tx.state != ISOTP_WAIT_FC {
+	if tx.state != ISOTP_WAIT_FC {
 		fmt.Println("---------------cts errors---------------")
 		return
 	}
@@ -96,7 +98,7 @@ func (tx *write) cts(f can.Frame) {
 func (tx *write) wait(f can.Frame) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
-	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FIRST_FC {
+	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FC {
 		if f.Len < 3 {
 			fmt.Println("---------------wait len errors---------------")
 			return
@@ -113,7 +115,7 @@ func (tx *write) wait(f can.Frame) {
 func (tx *write) overflow(f can.Frame) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
-	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FIRST_FC {
+	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FC {
 		fmt.Println("---------------overflow errors---------------", f)
 		return
 	}

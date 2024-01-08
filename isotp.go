@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 10:21:09
-// @ LastEditTime : 2024-01-05 16:38:01
+// @ LastEditTime : 2024-01-08 17:34:06
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"runtime"
+	"time"
 
 	"github.com/20yyq/packet/can"
 )
@@ -132,6 +134,9 @@ func (itp *isoTP) flowFrame(f can.Frame) {
 		case N_PCI_FC_CTS:
 			c.write.mutex.RLock()
 			if c.write.state == ISOTP_WAIT_FIRST_FC || c.write.state == ISOTP_WAIT_FC {
+				if c.write.state == ISOTP_WAIT_FIRST_FC {
+					c.write.timer.Reset(0)
+				}
 				run = (&c.write).cts
 			}
 			c.write.mutex.RUnlock()
@@ -154,6 +159,7 @@ func (itp *isoTP) flowFrame(f can.Frame) {
 	// fmt.Println("---------------(itp *isoTP) checkFrame---------------")
 }
 
+// txid 本地监听ID rxid 目标ID
 func IsoTP(txid, rxid uint32) *Conn {
 	canConn.mutex.Lock()
 	defer canConn.mutex.Unlock()
@@ -167,9 +173,9 @@ func IsoTP(txid, rxid uint32) *Conn {
 	c := itp.conn[rxid]
 	if c == nil {
 		c = &Conn{parent: itp}
-		c.read.cfg, c.read.c = defaultConfig, make(chan []byte, 5)
+		c.read.cfg, c.read.c, c.read.timer = defaultConfig, make(chan []byte, 5), time.NewTimer(time.Hour*24*365)
 		c.read.ff.Len, c.read.ff.Data = 3, [64]byte{N_PCI_FC_CTS, defaultConfig.BS, defaultConfig.STmin}
-		c.r, c.write.rxid = c.read.c, rxid
+		c.r, c.write.rxid, c.write.cfg, c.write.timer = c.read.c, rxid, defaultConfig, time.NewTimer(time.Hour*24*365)
 		(&c.read.ff).SetID(itp.txid)
 		itp.conn[rxid] = c
 	}
@@ -179,11 +185,18 @@ func IsoTP(txid, rxid uint32) *Conn {
 var defaultConfig = Config{
 	STmin: 0x05,
 	BS:    0x0F,
+	N_Re:  0x7F,
+	N_Se:  0x7F,
+	dlc:   8,
 }
 
 type Config struct {
 	STmin byte // 最小间隔时间（STmin，8bit）
 	BS    byte // 块大小（BS，8bit）最大为0x0F 0x00 表示再无流控帧
+	ISFD  bool
+	N_Re  byte // 协议包最长接收时间（毫秒）
+	N_Se  byte // 协议包最长发送时间（毫秒）
+	dlc   uint8
 }
 
 type Conn struct {
@@ -208,18 +221,55 @@ func (c *Conn) WriteData(b []byte) error {
 	if c.write.len = uint16(len(b)); c.write.len > MAX_PACKET {
 		return fmt.Errorf("too lenght")
 	}
-	c.write.state, c.write.b, c.write.n, c.write.sn = ISOTP_WAIT_FIRST_FC, make([]byte, c.write.len), 6, 1
-	frame := &can.Frame{Len: 8}
+	c.write.n, c.write.sn = int(c.write.cfg.dlc-2), 1
+	frame := &can.Frame{Len: uint8(c.write.len + 1)}
 	frame.SetID(c.write.rxid)
-	frame.Data[0], frame.Data[1] = byte(c.write.len>>8)|N_PCI_FF, byte(c.write.len)
-	copy(c.write.b, b)
-	copy(frame.Data[2:], c.write.b[0:c.write.n])
-	go send(*frame)
+	if int(c.write.len) > c.write.n {
+		c.write.b, c.write.state = make([]byte, c.write.len), ISOTP_WAIT_FIRST_FC
+		frame.Len, frame.Data[0], frame.Data[1] = c.write.cfg.dlc, byte(c.write.len>>8)|N_PCI_FF, byte(c.write.len)
+		copy(c.write.b, b)
+		copy(frame.Data[2:], c.write.b[:c.write.n])
+	} else {
+		frame.Data[0] = byte(c.write.len) | N_PCI_SF
+		copy(frame.Data[1:], b)
+	}
+	c.write.timer.Reset(time.Millisecond * time.Duration(c.write.cfg.N_Se))
+	go func(){
+		send(*frame)
+		start := time.Now()
+		<-c.write.timer.C
+		c.write.mutex.Lock()
+		defer c.write.mutex.Unlock()
+		if c.write.state == ISOTP_WAIT_FIRST_FC {
+			c.write.state = ISOTP_IDLE
+			fmt.Println("---------------WriteData time out---------------")
+			return
+		}
+		c.write.state = ISOTP_WAIT_FC
+		fmt.Println("---------------WriteData---------------")
+		fmt.Println(runtime.NumGoroutine(), time.Now().Sub(start).Milliseconds())
+	}()
 	return nil
 }
 
-func (c *Conn) ResetConfig(cfg Config) {
+func (c *Conn) ResetConfig(cfg Config) error {
+	c.write.mutex.Lock()
+	defer c.write.mutex.Unlock()
 	c.read.mutex.Lock()
 	defer c.read.mutex.Unlock()
+	if c.read.state != ISOTP_IDLE || c.write.state != ISOTP_IDLE {
+		return fmt.Errorf("busy")
+	}
+	if cfg.N_Re < 1 {
+		cfg.N_Re = 1
+	}
+	if cfg.N_Se < 1 {
+		cfg.N_Se = 1
+	}
+	if cfg.dlc = 8; cfg.ISFD {
+		cfg.dlc = 64
+	}
+	c.write.cfg = cfg
 	c.read.cfg = cfg
+	return nil
 }
