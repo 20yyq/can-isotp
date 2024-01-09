@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 10:21:09
-// @ LastEditTime : 2024-01-08 17:34:06
+// @ LastEditTime : 2024-01-09 15:56:39
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -13,8 +13,9 @@ package isotp
 import (
 	"fmt"
 	"io"
+	"os"
 	"sync"
-	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/20yyq/packet/can"
@@ -40,9 +41,11 @@ const (
 var canConn = struct {
 	mutex sync.RWMutex
 	can   Can
+	write chan *can.Frame
 	isotp map[uint32]*isoTP
 }{
 	isotp: map[uint32]*isoTP{},
+	write: make(chan *can.Frame, 10),
 }
 
 type Can interface {
@@ -63,6 +66,29 @@ func Init(c Can) {
 					go listener(frame)
 				}
 				frame, err = canConn.can.ReadFrame()
+			}
+		}()
+		go func() {
+			frame := <-canConn.write
+			for frame != nil {
+				err := canConn.can.WriteFrame(*frame)
+				count := 0
+				for err != nil {
+					count++
+					if e := err.(*os.PathError); e != nil {
+						if e.Err == os.ErrClosed || err == io.EOF {
+							fmt.Println("---------------CAN BUS Closed---------------")
+							return
+						}
+						// TODO linux CAN 过快写入出现 can0: no buffer space available
+						if syscall.ENOBUFS.Error() != e.Err.Error() {
+							break
+						}
+					}
+					time.Sleep(time.Microsecond * time.Duration(count))
+					err = canConn.can.WriteFrame(*frame)
+				}
+				frame = <-canConn.write
 			}
 		}()
 	}
@@ -108,13 +134,6 @@ func listener(frame can.Frame) {
 	go run(frame)
 }
 
-func send(f can.Frame) error {
-	if canConn.can != nil {
-		return canConn.can.WriteFrame(f)
-	}
-	return fmt.Errorf("not can")
-}
-
 func ignoreFrame(f can.Frame) {
 	fmt.Println("N_PCI---------ignoreFrame----------N_PCI", f)
 }
@@ -131,17 +150,8 @@ func (itp *isoTP) flowFrame(f can.Frame) {
 	for _, c := range itp.conn {
 		var run func(can.Frame)
 		switch f.Data[0] {
-		case N_PCI_FC_CTS:
-			c.write.mutex.RLock()
-			if c.write.state == ISOTP_WAIT_FIRST_FC || c.write.state == ISOTP_WAIT_FC {
-				if c.write.state == ISOTP_WAIT_FIRST_FC {
-					c.write.timer.Reset(0)
-				}
-				run = (&c.write).cts
-			}
-			c.write.mutex.RUnlock()
-		case N_PCI_FC_WT:
-			run = (&c.write).wait
+		case N_PCI_FC_CTS, N_PCI_FC_WT:
+			run = (&c.write).cts
 		case N_PCI_FC_OVFLW:
 			run = (&c.write).overflow
 		}
@@ -154,9 +164,6 @@ func (itp *isoTP) flowFrame(f can.Frame) {
 	if !is {
 		go ignoreFrame(f)
 	}
-	// fmt.Println("---------------(itp *isoTP) checkFrame---------------")
-	// fmt.Println(f)
-	// fmt.Println("---------------(itp *isoTP) checkFrame---------------")
 }
 
 // txid 本地监听ID rxid 目标ID
@@ -191,7 +198,7 @@ var defaultConfig = Config{
 }
 
 type Config struct {
-	STmin byte // 最小间隔时间（STmin，8bit）
+	STmin byte // 每块（BS值）协议包后的流控帧最小间隔时间（STmin，8bit）
 	BS    byte // 块大小（BS，8bit）最大为0x0F 0x00 表示再无流控帧
 	ISFD  bool
 	N_Re  byte // 协议包最长接收时间（毫秒）
@@ -215,7 +222,6 @@ func (c *Conn) WriteData(b []byte) error {
 	c.write.mutex.Lock()
 	defer c.write.mutex.Unlock()
 	if c.write.state != ISOTP_IDLE {
-		fmt.Println("---------------WriteData errors---------------")
 		return fmt.Errorf("busy")
 	}
 	if c.write.len = uint16(len(b)); c.write.len > MAX_PACKET {
@@ -233,21 +239,21 @@ func (c *Conn) WriteData(b []byte) error {
 		frame.Data[0] = byte(c.write.len) | N_PCI_SF
 		copy(frame.Data[1:], b)
 	}
+	canConn.write <- frame
 	c.write.timer.Reset(time.Millisecond * time.Duration(c.write.cfg.N_Se))
-	go func(){
-		send(*frame)
-		start := time.Now()
+	go func() {
+		// start := time.Now()
 		<-c.write.timer.C
+		if !c.write.timer.Reset(time.Hour * 24 * 365) {
+			c.write.timer.Reset(time.Hour * 24 * 365)
+		}
 		c.write.mutex.Lock()
 		defer c.write.mutex.Unlock()
 		if c.write.state == ISOTP_WAIT_FIRST_FC {
-			c.write.state = ISOTP_IDLE
 			fmt.Println("---------------WriteData time out---------------")
-			return
 		}
-		c.write.state = ISOTP_WAIT_FC
-		fmt.Println("---------------WriteData---------------")
-		fmt.Println(runtime.NumGoroutine(), time.Now().Sub(start).Milliseconds())
+		c.write.state = ISOTP_IDLE
+		// fmt.Println(runtime.NumGoroutine(), time.Now().Sub(start).Milliseconds())
 	}()
 	return nil
 }
@@ -268,6 +274,9 @@ func (c *Conn) ResetConfig(cfg Config) error {
 	}
 	if cfg.dlc = 8; cfg.ISFD {
 		cfg.dlc = 64
+	}
+	if cfg.BS > 0x0F {
+		cfg.BS = 0x0F
 	}
 	c.write.cfg = cfg
 	c.read.cfg = cfg

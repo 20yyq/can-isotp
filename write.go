@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 16:22:59
-// @ LastEditTime : 2024-01-08 13:42:49
+// @ LastEditTime : 2024-01-09 15:41:39
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -11,7 +11,6 @@
 package isotp
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
@@ -45,14 +44,14 @@ func (tx *write) loop() bool {
 		frame := &can.Frame{Len: uint8(n - tx.n + 1), Data: [64]byte{N_PCI_CF | tx.sn}}
 		frame.SetID(tx.rxid)
 		copy(frame.Data[1:], tx.b[tx.n:n])
-		send(*frame)
+		canConn.write <- frame
 		tx.mutex.Lock()
 		defer tx.mutex.Unlock()
 		if tx.state != ISOTP_SENDING {
 			break
 		}
 		if tx.n = n; tx.n == int(tx.len) {
-			tx.state = ISOTP_IDLE
+			tx.timer.Reset(0)
 			break
 		}
 		tx.sn++
@@ -70,13 +69,7 @@ func (tx *write) loop() bool {
 	return false
 }
 
-func (tx *write) cts(f can.Frame) {
-	tx.mutex.Lock()
-	defer tx.mutex.Unlock()
-	if tx.state != ISOTP_WAIT_FC {
-		fmt.Println("---------------cts errors---------------")
-		return
-	}
+func (tx *write) runLoop(f can.Frame) {
 	tx.state, tx.bs = ISOTP_SENDING, int8(f.Data[1])-1
 	endTime := time.Now().Add(time.Millisecond * 127)
 	if f.Data[2] > 0 {
@@ -85,7 +78,6 @@ func (tx *write) cts(f can.Frame) {
 	go func(endTime time.Time) {
 		for {
 			if endTime.Sub(time.Now()) < 1 {
-				fmt.Println("-------------------time out-------------------")
 				break
 			}
 			if !tx.loop() {
@@ -95,32 +87,30 @@ func (tx *write) cts(f can.Frame) {
 	}(endTime)
 }
 
-func (tx *write) wait(f can.Frame) {
+func (tx *write) cts(f can.Frame) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
-	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FC {
-		if f.Len < 3 {
-			fmt.Println("---------------wait len errors---------------")
-			return
-		}
-		fmt.Println("---------------wait errors---------------")
+	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FC && tx.state != ISOTP_WAIT_FIRST_FC {
 		return
 	}
-	tx.state = ISOTP_WAIT_FC
-	fmt.Println("---------------wait---------------")
-	fmt.Println(f)
-	fmt.Println("---------------wait---------------")
+	if tx.state == ISOTP_WAIT_FIRST_FC {
+		tx.runLoop(f)
+		return
+	}
+	if tx.state == ISOTP_SENDING {
+		tx.state = ISOTP_WAIT_FC
+		// fmt.Println("---------------wait---------------", f)
+		return
+	}
+	tx.runLoop(f)
 }
 
 func (tx *write) overflow(f can.Frame) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
 	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FC {
-		fmt.Println("---------------overflow errors---------------", f)
 		return
 	}
-	tx.state = ISOTP_IDLE
-	fmt.Println("---------------overflow---------------")
-	fmt.Println(f)
-	fmt.Println("---------------overflow---------------")
+	tx.timer.Reset(0)
+	// fmt.Println("---------------overflow---------------", f)
 }
