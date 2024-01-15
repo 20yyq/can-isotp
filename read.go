@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 16:22:17
-// @ LastEditTime : 2024-01-09 15:34:35
+// @ LastEditTime : 2024-01-15 16:10:39
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -33,20 +33,40 @@ type read struct {
 }
 
 func (rx *read) single(f can.Frame) {
-	fmt.Println("---------------single---------------")
+	rx.mutex.Lock()
+	defer rx.mutex.Unlock()
+	if rx.state == ISOTP_IDLE {
+		go func(b []byte) {
+			// TODO 是否考虑做丢弃处理
+			// for len(rx.c) == cap(rx.c) {
+			// 	<-rx.c
+			// }
+			rx.c <- b
+		}(f.Data[1 : f.Len-1])
+	}
 }
 
 func (rx *read) first(f can.Frame) {
 	rx.mutex.Lock()
 	defer rx.mutex.Unlock()
 	if rx.state == ISOTP_IDLE {
-		rx.sn, rx.len, rx.bs = 1, uint16(f.Data[0]&0x0F)<<8+uint16(f.Data[1]), int8(rx.cfg.BS)-1
-		rx.state, rx.n, rx.ff.Data = ISOTP_WAIT_DATA, int(f.Len-2), [64]byte{N_PCI_FC_CTS, rx.cfg.BS, rx.cfg.STmin}
+		rx.ff.Data = [64]byte{N_PCI_FC_CTS, rx.cfg.BS, rx.cfg.STmin}
 		copy(rx.b[0:], f.Data[2:f.Len])
-		go func(frame can.Frame) { canConn.write <- &frame }(rx.ff)
-		rx.timer.Reset(time.Millisecond * time.Duration(rx.cfg.N_Re))
+		if err := send(rx.ff); err != nil {
+			// TODO debug 写入错误
+			fmt.Println("---------------read first send frame err---------------", err)
+			return
+		}
+		rx.sn, rx.len, rx.bs = 1, uint16(f.Data[0]&0x0F)<<8+uint16(f.Data[1]), int8(rx.cfg.BS)-1
+		rx.state, rx.n = ISOTP_WAIT_DATA, int(f.Len-2)
+		d := time.Second
+		if rx.cfg.STmin < 0x80 {
+			d = time.Millisecond * time.Duration(rx.cfg.STmin+30) * time.Duration(rx.len/uint16(rx.cfg.dlc))
+		} else if rx.cfg.STmin > 0xF0 && rx.cfg.STmin < 0xFA {
+			d = time.Microsecond * 120 * time.Duration(rx.cfg.STmin&0x0F) * time.Duration(rx.len/uint16(rx.cfg.dlc))
+		}
+		rx.timer.Reset(d)
 		go func() {
-			// start := time.Now()
 			<-rx.timer.C
 			if !rx.timer.Reset(time.Hour * 24 * 365) {
 				rx.timer.Reset(time.Hour * 24 * 365)
@@ -54,7 +74,6 @@ func (rx *read) first(f can.Frame) {
 			rx.mutex.Lock()
 			defer rx.mutex.Unlock()
 			rx.state = ISOTP_IDLE
-			// fmt.Println(runtime.NumGoroutine(), time.Now().Sub(start).Milliseconds())
 		}()
 	}
 }
@@ -76,7 +95,10 @@ func (rx *read) consecutive(f can.Frame) {
 		if rx.bs > -1 {
 			if rx.bs--; rx.bs == -1 {
 				rx.bs = int8(rx.cfg.BS) - 1
-				go func(frame can.Frame) { canConn.write <- &frame }(rx.ff)
+				if err := send(rx.ff); err != nil {
+					// TODO debug 写入错误
+					fmt.Println("---------------read consecutive send frame err---------------", err)
+				}
 			}
 		}
 		return

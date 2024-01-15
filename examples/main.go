@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2023-02-20 08:50:39
-// @ LastEditTime : 2024-01-09 16:30:44
+// @ LastEditTime : 2024-01-15 16:13:50
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  : Linux can isotp protocol 使用例子
@@ -25,7 +25,7 @@ func main() {
 	if err == nil {
 		isotp.Init(c)
 		if itp := isotp.IsoTP(128, 384); itp != nil {
-			itp.ResetConfig(isotp.Config{STmin: 0x14, BS: 0x00, N_Re: 0xFF, N_Se: 0xFF}) // 20毫秒不限制接收帧数，再无流控帧发送
+			itp.ResetConfig(isotp.Config{STmin: 0x14, BS: 0x00}) // 每帧连续帧间隔20毫秒，不限制接收帧数，再无流控帧发送
 			go func() {
 				b := itp.ReadData()
 				for b != nil {
@@ -36,7 +36,7 @@ func main() {
 			}()
 		}
 		if itp := isotp.IsoTP(1, 257); itp != nil {
-			itp.ResetConfig(isotp.Config{STmin: 0x0A, BS: 0x0F, N_Re: 0xFF, N_Se: 0xFF}) // 10毫秒内每次能接收16帧，然后再发送一帧流控帧
+			itp.ResetConfig(isotp.Config{STmin: 0x0A, BS: 0x0F}) // 每帧连续帧间隔10毫秒接收16帧，然后等待下一帧流控帧
 			go func() {
 				b := itp.ReadData()
 				for b != nil {

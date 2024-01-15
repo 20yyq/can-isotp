@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 16:22:59
-// @ LastEditTime : 2024-01-09 15:41:39
+// @ LastEditTime : 2024-01-15 16:08:42
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -11,6 +11,7 @@
 package isotp
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -21,7 +22,7 @@ type write struct {
 	cfg   Config
 	mutex sync.RWMutex
 	timer *time.Timer
-	rxid  uint32
+	txid  uint32
 	state uint8
 	len   uint16
 	n     int
@@ -42,9 +43,13 @@ func (tx *write) loop() bool {
 			n = int(tx.len)
 		}
 		frame := &can.Frame{Len: uint8(n - tx.n + 1), Data: [64]byte{N_PCI_CF | tx.sn}}
-		frame.SetID(tx.rxid)
+		frame.SetID(tx.txid)
 		copy(frame.Data[1:], tx.b[tx.n:n])
-		canConn.write <- frame
+		if err := send(*frame); err != nil {
+			// TODO debug 写入错误
+			fmt.Println("---------------write loop send frame err---------------", err)
+			return true
+		}
 		tx.mutex.Lock()
 		defer tx.mutex.Unlock()
 		if tx.state != ISOTP_SENDING {
@@ -69,40 +74,37 @@ func (tx *write) loop() bool {
 	return false
 }
 
-func (tx *write) runLoop(f can.Frame) {
-	tx.state, tx.bs = ISOTP_SENDING, int8(f.Data[1])-1
-	endTime := time.Now().Add(time.Millisecond * 127)
-	if f.Data[2] > 0 {
-		endTime = time.Now().Add(time.Millisecond * time.Duration(f.Data[2]))
-	}
-	go func(endTime time.Time) {
-		for {
-			if endTime.Sub(time.Now()) < 1 {
-				break
-			}
-			if !tx.loop() {
-				break
-			}
-		}
-	}(endTime)
-}
-
 func (tx *write) cts(f can.Frame) {
 	tx.mutex.Lock()
 	defer tx.mutex.Unlock()
-	if tx.state != ISOTP_SENDING && tx.state != ISOTP_WAIT_FC && tx.state != ISOTP_WAIT_FIRST_FC {
-		return
-	}
-	if tx.state == ISOTP_WAIT_FIRST_FC {
-		tx.runLoop(f)
-		return
-	}
-	if tx.state == ISOTP_SENDING {
+	switch tx.state {
+	case ISOTP_SENDING:
 		tx.state = ISOTP_WAIT_FC
 		// fmt.Println("---------------wait---------------", f)
-		return
+	case ISOTP_WAIT_FIRST_FC:
+		if f.Data[2] > 0 && f.Data[2] < 0x80 {
+			tx.timer.Reset(time.Millisecond * time.Duration(f.Data[2]+5) * time.Duration(tx.len/uint16(f.Len)))
+		} else if f.Data[2] > 0xF0 && f.Data[2] < 0xFA {
+			tx.timer.Reset(time.Microsecond * 105 * time.Duration(f.Data[2]&0x0F) * time.Duration(tx.len/uint16(f.Len)))
+		}
+		fallthrough
+	case ISOTP_WAIT_FC:
+		tx.state, tx.bs = ISOTP_SENDING, int8(f.Data[1])-1
+		var d time.Duration
+		if f.Data[2] < 0x80 {
+			d = time.Millisecond * time.Duration(f.Data[2])
+		} else if f.Data[2] > 0xF0 && f.Data[2] < 0xFA {
+			d = time.Microsecond * 100 * time.Duration(f.Data[2]&0x0F)
+		}
+		go func(d time.Duration) {
+			for {
+				time.Sleep(d)
+				if !tx.loop() {
+					break
+				}
+			}
+		}(d)
 	}
-	tx.runLoop(f)
 }
 
 func (tx *write) overflow(f can.Frame) {
