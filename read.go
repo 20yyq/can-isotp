@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 16:22:17
-// @ LastEditTime : 2024-01-15 16:10:39
+// @ LastEditTime : 2024-01-16 10:07:55
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -60,7 +60,7 @@ func (rx *read) first(f can.Frame) {
 		rx.sn, rx.len, rx.bs = 1, uint16(f.Data[0]&0x0F)<<8+uint16(f.Data[1]), int8(rx.cfg.BS)-1
 		rx.state, rx.n = ISOTP_WAIT_DATA, int(f.Len-2)
 		d := time.Second
-		if rx.cfg.STmin < 0x80 {
+		if rx.cfg.STmin > 0 && rx.cfg.STmin < 0x80 {
 			d = time.Millisecond * time.Duration(rx.cfg.STmin+30) * time.Duration(rx.len/uint16(rx.cfg.dlc))
 		} else if rx.cfg.STmin > 0xF0 && rx.cfg.STmin < 0xFA {
 			d = time.Microsecond * 120 * time.Duration(rx.cfg.STmin&0x0F) * time.Duration(rx.len/uint16(rx.cfg.dlc))
