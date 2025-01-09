@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 10:21:09
-// @ LastEditTime : 2024-07-30 15:01:06
+// @ LastEditTime : 2025-01-09 09:06:35
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -90,6 +90,12 @@ func listener() {
 			frame, err = canConn.can.ReadFrame()
 		}
 		close(rcv)
+		for _, v := range canConn.list {
+			v.Close()
+			if v.read.state.Load() == uint32(ISOTP_WAIT_FF_SF) {
+				close(v.read.pip)
+			}
+		}
 	}()
 	for {
 		frame, ok := <-rcv
@@ -182,7 +188,7 @@ type Conn struct {
 }
 
 func (c *Conn) Read(b []byte) (int, error) {
-	n, err := c.buf.Read(b)
+	n, _ := c.buf.Read(b)
 	if n < len(b) {
 		b1, ok := <-c.read.pip
 		if !ok {
@@ -195,7 +201,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 		copy(b[n:], b1)
 		n += len(b1)
 	}
-	return n, err
+	return n, nil
 }
 
 func (c *Conn) Write(b []byte) (int, error) {
@@ -214,36 +220,32 @@ func (c *Conn) Write(b []byte) (int, error) {
 	c.write.n, c.write.b = 0, b
 	c.write.len = uint16(len(b))
 	c.write.timer.Reset(time.Second)
-	// max sf_dl
-	// sf_dl := c.write.cfg.dlc - SF_PCI_SZ8 - 1
-	// not ext addr and one byte
-	// if (!(sk->tx.addr.flags & ISOTP_PKG_EXT_ADDR))
-	// 	sf_dl++;
-	// // not can fd and one byte
-	// if (!(sk->tx.addr.flags & ISOTP_PKG_FDF))
-	// 	sf_dl++;
-	// if (len > sf_dl)
-	// 	func = isotp_send_ff;
 	go c.write.first()
 	<-c.write.timer.C
+	var err error
 	switch uint8(c.write.state.Load()) {
 	case ISOTP_WAIT_FIRST_FC:
 		fmt.Println("--------ISOTP_WAIT_FIRST_FC-------")
+		err = fmt.Errorf("--------ISOTP_WAIT_FIRST_FC-------")
 	case ISOTP_WAIT_FC:
 		fmt.Println("--------ISOTP_WAIT_FC-------")
+		err = fmt.Errorf("--------ISOTP_WAIT_FC-------")
 	case ISOTP_SEND_SF:
 		fmt.Println("--------ISOTP_SEND_SF-------")
+		err = fmt.Errorf("--------ISOTP_SEND_SF-------")
 	case ISOTP_SEND_FF:
 		fmt.Println("--------ISOTP_SEND_FF-------")
+		err = fmt.Errorf("--------ISOTP_SEND_FF-------")
 	case ISOTP_SEND_CF:
 		fmt.Println("--------ISOTP_SEND_CF-------")
+		err = fmt.Errorf("--------ISOTP_SEND_CF-------")
 	case ISOTP_SEND_END:
-		fmt.Println("--------ISOTP_SEND_END-------")
+		fmt.Println("--------ISOTP_SEND_CF-------")
 	default:
 		fmt.Println("--------------------------")
 	}
 	c.write.state.Store(uint32(ISOTP_IDLE))
-	return len(b), nil
+	return len(b), err
 }
 
 func (c *Conn) Close() error {
@@ -251,18 +253,3 @@ func (c *Conn) Close() error {
 	c.write.close.Store(true)
 	return nil
 }
-
-// func (c *Conn) ResetConfig(cfg Config) error {
-// 	if uint8(c.read.state.Load()) != ISOTP_WAIT_FF_SF || uint8(c.write.state.Load()) != ISOTP_IDLE {
-// 		return fmt.Errorf("busy")
-// 	}
-// 	if cfg.dlc = 8; cfg.IsFD {
-// 		cfg.dlc = 64
-// 	}
-// 	if cfg.BS > 0x0F {
-// 		cfg.BS = 0x0F
-// 	}
-// 	c.write.cfg = cfg
-// 	c.read.cfg = cfg
-// 	return nil
-// }

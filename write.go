@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2024-01-05 16:22:59
-// @ LastEditTime : 2024-07-30 15:58:47
+// @ LastEditTime : 2025-01-09 08:37:40
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  :
@@ -102,8 +102,8 @@ func (tx *write) first() {
 	if item += 2; tx.len > MAX_FF_DL12 {
 		frame.Data[item-2] = N_PCI_FF
 		frame.Data[item-1] = 0
-		frame.Data[item] = uint8(tx.len >> 24 & 0xFF)
-		frame.Data[item+1] = uint8(tx.len >> 16 & 0xFF)
+		frame.Data[item] = uint8(uint32(tx.len) >> 24 & 0xFF)
+		frame.Data[item+1] = uint8(uint32(tx.len) >> 16 & 0xFF)
 		frame.Data[item+2] = uint8(tx.len >> 8 & 0xFF)
 		frame.Data[item+3] = uint8(tx.len & 0xFF)
 		item += 4

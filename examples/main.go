@@ -1,7 +1,7 @@
 // @@
 // @ Author       : Eacher
 // @ Date         : 2023-02-20 08:50:39
-// @ LastEditTime : 2024-01-15 16:13:50
+// @ LastEditTime : 2025-01-09 09:04:08
 // @ LastEditors  : Eacher
 // @ --------------------------------------------------------------------------------<
 // @ Description  : Linux can isotp protocol 使用例子
@@ -17,6 +17,7 @@ import (
 	"github.com/20yyq/can-debugger/sockcan"
 	"github.com/20yyq/isotp"
 	"github.com/20yyq/packet/can"
+	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -24,25 +25,27 @@ func main() {
 	c, err := NewCan("can0")
 	if err == nil {
 		isotp.Init(c)
-		if itp := isotp.IsoTP(128, 384); itp != nil {
-			itp.ResetConfig(isotp.Config{STmin: 0x14, BS: 0x00}) // 每帧连续帧间隔20毫秒，不限制接收帧数，再无流控帧发送
+		// 每帧连续帧间隔20毫秒，不限制接收帧数，再无流控帧发送
+		if itp := isotp.IsoTP(isotp.Config{ID: 128, STmin: 0x14, BS: 0x00}, isotp.Config{ID: 384, STmin: 0x14, BS: 0x00}); itp != nil {
 			go func() {
-				b := itp.ReadData()
-				for b != nil {
-					fmt.Println(string(b))
-					b = itp.ReadData()
-					fmt.Println("128, 384", itp.WriteData([]byte(code)))
+				b := make([]byte, 4096)
+				n, err := itp.Read(b)
+				for err == nil {
+					fmt.Println(string(b[:n]))
+					n, err = itp.Read(b)
+					fmt.Println(itp.Write([]byte(code)))
 				}
 			}()
 		}
-		if itp := isotp.IsoTP(1, 257); itp != nil {
-			itp.ResetConfig(isotp.Config{STmin: 0x0A, BS: 0x0F}) // 每帧连续帧间隔10毫秒接收16帧，然后等待下一帧流控帧
+		// 每帧连续帧间隔10毫秒接收16帧，然后等待下一帧流控帧
+		if itp := isotp.IsoTP(isotp.Config{ID: 1, STmin: 0x0A, BS: 0x0F}, isotp.Config{ID: 257, STmin: 0x0A, BS: 0x0F}); itp != nil {
 			go func() {
-				b := itp.ReadData()
-				for b != nil {
-					fmt.Println(string(b))
-					b = itp.ReadData()
-					fmt.Println("1, 257", itp.WriteData([]byte(`func (c *Can) WriteFrame(frame can.Frame) error {
+				b := make([]byte, 4096)
+				n, err := itp.Read(b)
+				for err != nil {
+					fmt.Println(string(b[:n]))
+					n, err = itp.Read(b)
+					fmt.Println(itp.Write([]byte(`func (c *Can) WriteFrame(frame can.Frame) error {
 						_, err := c.rwc.Write(frame.WireFormat())
 						return err
 					}`)))
@@ -81,6 +84,11 @@ func (c *Can) WriteFrame(frame can.Frame) error {
 		return errors.New("not Frame")
 	}
 	return c.conn.WriteFrame(frame)
+}
+
+func (c *Can) AddCanFilter(frame unix.CanFilter) error {
+	// TODO
+	return nil
 }
 
 const code = `
